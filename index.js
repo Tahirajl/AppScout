@@ -86,7 +86,7 @@ async function scanKeyword(keyword) {
   if (results.length === 0) {
     return {
       keyword,
-      volumeProxy: 0,
+      volumeProxy: 'Low',
       topCompetitor: null,
       reviews: null,
       rating: null,
@@ -131,9 +131,17 @@ async function scanKeyword(keyword) {
     monthsSinceUpdate: avgMonthsSince,
   });
 
+  const signalReviews =
+    typeof top.reviews === 'number' ? top.reviews : isNaN(avgReviews) ? null : avgReviews;
+  let volumeProxy;
+  if (typeof signalReviews !== 'number') volumeProxy = 'Low';
+  else if (signalReviews < 500) volumeProxy = 'Low';
+  else if (signalReviews <= 5000) volumeProxy = 'Medium';
+  else volumeProxy = 'High';
+
   return {
     keyword,
-    volumeProxy: results.length,
+    volumeProxy,
     topCompetitor: top.title,
     reviews: isNaN(avgReviews) ? null : avgReviews ? Math.round(avgReviews) : null,
     rating: isNaN(avgRating) ? null : avgRating ? Number(avgRating.toFixed(2)) : null,
