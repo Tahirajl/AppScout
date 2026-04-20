@@ -44,33 +44,28 @@ function calculateOpportunityScore({ rating, reviews, monthsSinceUpdate }) {
 }
 
 function pickRating(app) {
-  return (
-    app.rating ??
-    app.average_rating ??
-    app.ratings?.average ??
-    app.ratings?.rating ??
-    null
-  );
+  if (Array.isArray(app.rating) && app.rating.length > 0) {
+    const all = app.rating.find((r) => r.type === 'All Times') || app.rating[0];
+    return all?.rating ?? null;
+  }
+  if (typeof app.rating === 'number') return app.rating;
+  return app.average_rating ?? app.ratings?.average ?? null;
 }
 
 function pickReviewCount(app) {
-  return (
-    app.reviews ??
-    app.review_count ??
-    app.ratings?.count ??
-    app.ratings?.reviews ??
-    app.rating_count ??
-    null
-  );
+  if (Array.isArray(app.rating) && app.rating.length > 0) {
+    const all = app.rating.find((r) => r.type === 'All Times') || app.rating[0];
+    return all?.count ?? null;
+  }
+  return app.reviews ?? app.review_count ?? app.ratings?.count ?? null;
 }
 
 function pickLastUpdated(app) {
   return (
+    app.latest_version_release_date ||
     app.latest_version_released_on ||
     app.release_date ||
-    app.latest_release_date ||
     app.updated ||
-    app.version_history?.[0]?.released_on ||
     null
   );
 }
@@ -81,7 +76,7 @@ async function scanKeyword(keyword) {
       engine: 'apple_app_store',
       term: keyword,
       country: 'us',
-      lang: 'en',
+      lang: 'en-us',
       api_key: SERPAPI_KEY,
     },
     timeout: 30000,
@@ -195,7 +190,7 @@ app.get('/api/test', async (req, res) => {
         engine: 'apple_app_store',
         term: 'weather',
         country: 'us',
-        lang: 'en',
+        lang: 'en-us',
         api_key: SERPAPI_KEY,
       },
       timeout: 20000,
