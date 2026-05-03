@@ -14,202 +14,156 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
 function monthsBetween(dateStr) {
-  if (!dateStr) return null;
-  const then = new Date(dateStr);
-  if (isNaN(then.getTime())) return null;
-  const now = new Date();
-  return (now.getFullYear() - then.getFullYear()) * 12 + (now.getMonth() - then.getMonth());
+    if (!dateStr) return null;
+    const then = new Date(dateStr);
+    if (isNaN(then.getTime())) return null;
+    const now = new Date();
+    return (now.getFullYear() - then.getFullYear()) * 12 + (now.getMonth() - then.getMonth());
 }
 
-function calculateOpportunityScore({ rating, reviews, monthsSinceUpdate }) {
-  let score = 50;
+// Volume signal based on total result count from SerpApi
+function getVolumeSignal(totalResults) {
+    if (!totalResults || totalResults < 10) return { label: 'Low', score: 0 };
+    if (totalResults < 50) return { label: 'Low', score: 5 };
+    if (totalResults < 200) return { label: 'Medium', score: 15 };
+    return { label: 'High', score: 25 };
+}
 
+// Max method: count how many apps have over 100 reviews
+function countAppsOver100Reviews(apps) {
+    return apps.filter(a => {
+          const r = Array.isArray(a.rating) ? a.rating[0] : a.rating;
+          const count = r?.count || r?.reviews || 0;
+          return count > 100;
+    }).length;
+}
+
+function calculateOpportunityScore({ rating, reviews, monthsSinceUpdate, totalResults, appsOver100 }) {
+    let score = 50;
+
+  // Review count signal
   if (typeof reviews === 'number') {
-    if (reviews < 100) score += 25;
-    else if (reviews < 500) score += 15;
-    else if (reviews < 1000) score += 10;
+        if (reviews < 100) score += 25;
+        else if (reviews < 500) score += 15;
+        else if (reviews < 1000) score += 10;
+        else if (reviews < 5000) score += 5;
   }
 
+  // Rating signal - lower rating = more opportunity
   if (typeof rating === 'number') {
-    if (rating < 3.5) score += 15;
-    else if (rating < 4.0) score += 10;
+        if (rating < 3.5) score += 15;
+        else if (rating < 4.0) score += 10;
+        else if (rating < 4.3) score += 5;
   }
 
+  // Last update signal
   if (typeof monthsSinceUpdate === 'number') {
-    if (monthsSinceUpdate > 12) score += 20;
-    else if (monthsSinceUpdate > 6) score += 10;
+        if (monthsSinceUpdate > 24) score += 20;
+        else if (monthsSinceUpdate > 12) score += 15;
+        else if (monthsSinceUpdate > 6) score += 10;
   }
 
-  return Math.min(100, score);
-}
+  // Volume signal from SerpApi result count
+  const volume = getVolumeSignal(totalResults);
+    score += volume.score;
 
-function pickRating(app) {
-  if (Array.isArray(app.rating) && app.rating.length > 0) {
-    const all = app.rating.find((r) => r.type === 'All Times') || app.rating[0];
-    return all?.rating ?? null;
-  }
-  if (typeof app.rating === 'number') return app.rating;
-  return app.average_rating ?? app.ratings?.average ?? null;
-}
-
-function pickReviewCount(app) {
-  if (Array.isArray(app.rating) && app.rating.length > 0) {
-    const all = app.rating.find((r) => r.type === 'All Times') || app.rating[0];
-    return all?.count ?? null;
-  }
-  return app.reviews ?? app.review_count ?? app.ratings?.count ?? null;
-}
-
-function pickLastUpdated(app) {
-  return (
-    app.latest_version_release_date ||
-    app.latest_version_released_on ||
-    app.release_date ||
-    app.updated ||
-    null
-  );
-}
-
-async function scanKeyword(keyword) {
-  const { data } = await axios.get(SERPAPI_URL, {
-    params: {
-      engine: 'apple_app_store',
-      term: keyword,
-      country: 'us',
-      lang: 'en-us',
-      api_key: SERPAPI_KEY,
-    },
-    timeout: 30000,
-  });
-
-  const results = (data.organic_results || data.results || []).slice(0, 10);
-  if (results.length === 0) {
-    return {
-      keyword,
-      volumeProxy: 'Low',
-      topCompetitor: null,
-      reviews: null,
-      rating: null,
-      lastUpdated: null,
-      monthsSinceUpdate: null,
-      opportunityScore: 50,
-    };
+  // Max method: bonus if fewer than 4 apps have over 100 reviews
+  if (typeof appsOver100 === 'number') {
+        if (appsOver100 === 0) score += 20;
+        else if (appsOver100 <= 2) score += 15;
+        else if (appsOver100 <= 4) score += 10;
   }
 
-  const enriched = results.map((app) => {
-    const rating = pickRating(app);
-    const reviews = pickReviewCount(app);
-    const lastUpdated = pickLastUpdated(app);
-    const monthsSinceUpdate = monthsBetween(lastUpdated);
-    return {
-      title: app.title || app.name || 'Unknown',
-      rating: typeof rating === 'number' ? rating : rating ? Number(rating) : null,
-      reviews: typeof reviews === 'number' ? reviews : reviews ? Number(reviews) : null,
-      lastUpdated,
-      monthsSinceUpdate,
-    };
-  });
-
-  const valid = enriched.filter((e) => e.rating !== null || e.reviews !== null);
-  const avgRating = valid.length
-    ? valid.reduce((s, e) => s + (e.rating || 0), 0) / valid.filter((e) => e.rating !== null).length
-    : null;
-  const avgReviews = valid.length
-    ? valid.reduce((s, e) => s + (e.reviews || 0), 0) / valid.filter((e) => e.reviews !== null).length
-    : null;
-  const avgMonthsSince = (() => {
-    const withMonths = enriched.filter((e) => typeof e.monthsSinceUpdate === 'number');
-    if (!withMonths.length) return null;
-    return withMonths.reduce((s, e) => s + e.monthsSinceUpdate, 0) / withMonths.length;
-  })();
-
-  const top = enriched[0];
-
-  const opportunityScore = calculateOpportunityScore({
-    rating: isNaN(avgRating) ? null : avgRating,
-    reviews: isNaN(avgReviews) ? null : avgReviews,
-    monthsSinceUpdate: avgMonthsSince,
-  });
-
-  const signalReviews =
-    typeof top.reviews === 'number' ? top.reviews : isNaN(avgReviews) ? null : avgReviews;
-  let volumeProxy;
-  if (typeof signalReviews !== 'number') volumeProxy = 'Low';
-  else if (signalReviews < 500) volumeProxy = 'Low';
-  else if (signalReviews <= 5000) volumeProxy = 'Medium';
-  else volumeProxy = 'High';
-
-  return {
-    keyword,
-    volumeProxy,
-    topCompetitor: top.title,
-    reviews: isNaN(avgReviews) ? null : avgReviews ? Math.round(avgReviews) : null,
-    rating: isNaN(avgRating) ? null : avgRating ? Number(avgRating.toFixed(2)) : null,
-    lastUpdated: top.lastUpdated,
-    monthsSinceUpdate: avgMonthsSince !== null ? Number(avgMonthsSince.toFixed(1)) : null,
-    opportunityScore,
-  };
+  return Math.min(score, 100);
 }
-
-app.post('/api/scan', async (req, res) => {
-  try {
-    if (!SERPAPI_KEY) {
-      return res.status(500).json({ error: 'SERPAPI_KEY not configured' });
-    }
-
-    const { keywords } = req.body;
-    if (!Array.isArray(keywords) || keywords.length === 0) {
-      return res.status(400).json({ error: 'keywords must be a non-empty array' });
-    }
-
-    const cleaned = keywords
-      .map((k) => String(k).trim())
-      .filter(Boolean)
-      .slice(0, 50);
-
-    const results = [];
-    for (const kw of cleaned) {
-      try {
-        results.push(await scanKeyword(kw));
-      } catch (err) {
-        results.push({
-          keyword: kw,
-          error: err.response?.data?.error || err.message,
-          opportunityScore: 0,
-        });
-      }
-    }
-
-    results.sort((a, b) => (b.opportunityScore || 0) - (a.opportunityScore || 0));
-    res.json({ results });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: err.message });
-  }
-});
 
 app.get('/api/test', async (req, res) => {
-  try {
-    if (!SERPAPI_KEY) {
-      return res.status(500).json({ ok: false, error: 'SERPAPI_KEY not configured' });
+    try {
+          const response = await axios.get(SERPAPI_URL, {
+                  params: { engine: 'apple_app_store', term: 'productivity', api_key: SERPAPI_KEY, num: 5 }
+          });
+          const results = response.data?.organic_results || [];
+          res.json({ ok: true, resultCount: results.length });
+    } catch (err) {
+          res.status(500).json({ ok: false, error: err.message });
     }
-    const { data } = await axios.get(SERPAPI_URL, {
-      params: {
-        engine: 'apple_app_store',
-        term: 'weather',
-        country: 'us',
-        lang: 'en-us',
-        api_key: SERPAPI_KEY,
-      },
-      timeout: 20000,
-    });
-    const count = (data.organic_results || data.results || []).length;
-    res.json({ ok: true, resultCount: count });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: err.response?.data?.error || err.message });
-  }
+});
+
+app.post('/api/scan', async (req, res) => {
+    const { keywords } = req.body;
+    if (!keywords || !Array.isArray(keywords) || keywords.length === 0) {
+          return res.status(400).json({ error: 'No keywords provided' });
+    }
+
+           const results = [];
+
+           for (const keyword of keywords) {
+                 try {
+                         const response = await axios.get(SERPAPI_URL, {
+                                   params: {
+                                               engine: 'apple_app_store',
+                                               term: keyword,
+                                               api_key: SERPAPI_KEY,
+                                               num: 10,
+                                               lang: 'en-us',
+                                               country: 'us'
+                                   }
+                         });
+
+                   const apps = response.data?.organic_results || [];
+                         const totalResults = response.data?.search_information?.total_results || apps.length;
+                         const topApp = apps[0];
+
+                   if (!topApp) {
+                             results.push({ keyword, topCompetitor: 'No results', reviews: null, rating: null, lastUpdated: null, opportunityScore: 50, volumeProxy: 'Unknown' });
+                             continue;
+                   }
+
+                   // Extract rating
+                   let avgRating = null;
+                         let reviewCount = null;
+                         if (Array.isArray(topApp.rating)) {
+                                   const allTime = topApp.rating.find(r => r.type === 'All Times') || topApp.rating[0];
+                                   if (allTime) { avgRating = allTime.rating; reviewCount = allTime.count; }
+                         } else if (topApp.rating && typeof topApp.rating === 'object') {
+                                   avgRating = topApp.rating.average || topApp.rating.rating;
+                                   reviewCount = topApp.rating.count || topApp.rating.reviews;
+                         }
+
+                   const lastUpdated = topApp.latest_version_release_date || topApp.update_date || null;
+                         const months = monthsBetween(lastUpdated);
+                         const volume = getVolumeSignal(totalResults);
+                         const appsOver100 = countAppsOver100Reviews(apps);
+
+                   const opportunityScore = calculateOpportunityScore({
+                             rating: avgRating,
+                             reviews: reviewCount,
+                             monthsSinceUpdate: months,
+                             totalResults,
+                             appsOver100
+                   });
+
+                   results.push({
+                             keyword,
+                             topCompetitor: topApp.title || topApp.name || 'Unknown',
+                             reviews: reviewCount,
+                             rating: avgRating ? parseFloat(avgRating.toFixed(2)) : null,
+                             lastUpdated: lastUpdated ? lastUpdated.split('T')[0] : null,
+                             opportunityScore,
+                             volumeProxy: volume.label,
+                             totalResults,
+                             appsOver100
+                   });
+
+                 } catch (err) {
+                         results.push({ keyword, error: err.message, opportunityScore: 0, volumeProxy: 'Error' });
+                 }
+           }
+
+           results.sort((a, b) => b.opportunityScore - a.opportunityScore);
+    res.json(results);
 });
 
 app.listen(PORT, () => {
-  console.log(`AppScout running at http://localhost:${PORT}`);
+    console.log(`AppScout running on port ${PORT}`);
 });
